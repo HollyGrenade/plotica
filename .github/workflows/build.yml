@@ -27,7 +27,7 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Rust kurulumu
         uses: dtolnay/rust-toolchain@stable
@@ -45,7 +45,7 @@ jobs:
           args: ${{ matrix.args }}
 
       - name: Ciktilari yukle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: Plotica-${{ matrix.name }}
           path: |
