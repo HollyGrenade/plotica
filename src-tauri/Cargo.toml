@@ -1,0 +1,35 @@
+[package]
+name = "plotica"
+version = "1.0.0"
+description = "Plotica - Senaryo yazma uygulaması"
+authors = ["Hasan Basri Yaman"]
+edition = "2021"
+
+[lib]
+name = "plotica_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+webbrowser = "1"
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+urlencoding = "2"
+
+[target.'cfg(windows)'.dependencies]
+# Sürümler tauri 2.11.x ile eşleşmeli, yoksa COM tipleri uyuşmaz
+webview2-com = "0.38"
+windows = { version = "0.61", features = ["Win32_Foundation"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

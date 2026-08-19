@@ -1,0 +1,56 @@
+name: Plotica derleme
+
+# macOS (.dmg) ve Windows (.exe/.msi) kurulum dosyalarini uretir.
+# Calistirma: GitHub'da Actions sekmesi -> "Plotica derleme" -> Run workflow
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Apple Silicon (M1/M2/M3/M4)
+          - platform: macos-latest
+            args: '--target aarch64-apple-darwin'
+            name: 'macOS-AppleSilicon'
+          # Intel Mac
+          - platform: macos-latest
+            args: '--target x86_64-apple-darwin'
+            name: 'macOS-Intel'
+          - platform: windows-latest
+            args: ''
+            name: 'Windows'
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust kurulumu
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust onbellegi
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Uygulamayi derle
+        uses: tauri-apps/tauri-action@v0
+        with:
+          args: ${{ matrix.args }}
+
+      - name: Ciktilari yukle
+        uses: actions/upload-artifact@v4
+        with:
+          name: Plotica-${{ matrix.name }}
+          path: |
+            src-tauri/target/**/release/bundle/dmg/*.dmg
+            src-tauri/target/**/release/bundle/macos/*.app
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: ignore
