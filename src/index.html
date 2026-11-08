@@ -860,56 +860,132 @@ function onUserSignedIn(user){
 
 function onUserSignedOut(){
   isOnline=false;
+  changeWorkspace(null);
   if(fbUnsubscribe){fbUnsubscribe();fbUnsubscribe=null;}
   document.getElementById('userInfo').style.display='none';
   document.getElementById('loginScreen').style.display='flex';
   setSyncStatus('offline');
 }
 
-function startRealtimeSync(uid){
-  if(fbUnsubscribe) fbUnsubscribe();
-  var docRef=fbDb.collection('scenarios').doc(uid);
-  var first=true;
-  fbUnsubscribe=docRef.onSnapshot(function(snap){
-    if(snap.exists){
-      var d=snap.data();
-      // Only load from Firebase on first load OR when not dirty
-      // Never overwrite local changes that haven't been pushed yet
-      if(first && !state.dirty){
-        state.title=d.title||'Yeni Senaryo';
-        state.prolog=d.prolog||'';
-        state.scenes=d.scenes||[];
-        state.characters=d.characters||[];
-        state.versions=d.versions||[];
-        state.marks=d.marks||{};
-        state.revMarks=d.revMarks||{};
-        state.markNotes=d.markNotes||{};
-        state.markPhotos=d.markPhotos||{};
-        state.beatPhotos=d.beatPhotos||{};
-        state.cover=d.cover||{};
-        state.charBios=d.charBios||{};
-        if(d.characters) d.characters.forEach(function(dc,i){if(state.characters[i])state.characters[i].bio=dc.bio||{};});
-        console.log('[PLOTICA] Firebase first load: cover='+JSON.stringify(state.cover).slice(0,80));
-        renderAll();
-      } else if(!state.dirty){
-        // Only sync non-sensitive fields when not dirty to avoid race conditions
-        // Do NOT overwrite cover/markNotes/markPhotos from Firebase during active session
-        state.title=d.title||state.title;
-        // prolog artık başlıksız sahne olarak scenes içinde taşınıyor;
-        // eski buluttan gelen d.prolog canlı senkronda YOK SAYILIR (kopya önlemi)
-        state.scenes=d.scenes||state.scenes;
-        state.characters=d.characters||state.characters;
-        state.marks=d.marks||state.marks;
-        // Keep local cover/markNotes/markPhotos - don't overwrite from Firebase
-        renderAll();
-        showToast(T[lang].toastUpdated,'info');
-      }
-      first=false;
-    }else{first=false;}
-    setSyncStatus('synced');
-  },function(err){setSyncStatus('offline');});
+var workspaceUid=null;
+var cloudSession=null;
+function projectKey(base){return workspaceUid ? base+'_'+workspaceUid : base;}
+function cloudError(session,err){
+  if(cloudSession!==session)return;
+  setSyncStatus('offline');
+  if(session.error===err.message)return;
+  session.error=err.message;
+  showToast(t('syncOffline')+' · '+(err.code||err.message),'error');
+}
+function changeWorkspace(owner){
+  if(workspaceUid===owner)return true;
+  if(state.dirty && !saveCurrentProject())return false;
+  clearTimeout(autoSaveTimer);
+  if(fbUnsubscribe){fbUnsubscribe();fbUnsubscribe=null;}
+  cloudSession=null;
+  var guestProjects=!workspaceUid && owner ? loadProjects().filter(function(p){
+    return !p.placeholder && ((p.data.scenes||[]).length || p.data.prolog || p.name!=='Yeni Proje' || (p.data.versions||[]).length || Object.values(p.data.cover||{}).some(Boolean));
+  }) : [];
+  workspaceUid=owner;
+  if(owner && !localStorage.getItem(projectKey('plotica_projects')) && guestProjects.length){
+    var question={tr:'Bu cihazdaki projeleri bu hesaba kopyala?',en:'Copy projects from this device into this account?',de:'Projekte dieses Geräts in dieses Konto kopieren?',es:'¿Copiar los proyectos de este dispositivo a esta cuenta?',it:'Copiare i progetti di questo dispositivo in questo account?'};
+    if(confirm((fbUser && fbUser.email || owner)+' — '+(question[lang]||question.en))){
+      guestProjects.forEach(function(p){p.id=uid('proj_');p.pending=uid('import_');});
+      if(!saveProjects(guestProjects)){workspaceUid=null;return false;}
+    }
+  }
+  state.dirty=false;
+  currentProjectId=null;
+  initProjects();
+  return true;
+}
+function startRealtimeSync(owner){
+  if(cloudSession && cloudSession.owner===owner && !cloudSession.failed)return;
+  if(fbUnsubscribe){fbUnsubscribe();fbUnsubscribe=null;}
+  if(!changeWorkspace(owner))return;
+  var root=fbDb.collection('scenarios').doc(owner);
+  var session={owner:owner,docs:root.collection('projects'),writes:new Map(),ready:false};
+  cloudSession=session;
+  // A deterministic destination and a transaction make migration safe on two devices.
+  var legacy=session.docs.doc('legacy');
+  fbDb.runTransaction(async function(tx){
+    if((await tx.get(legacy)).exists)return;
+    var old=await tx.get(root);
+    if(old.exists){
+      var data=old.data();
+      delete data.updatedAt;
+      tx.set(legacy,{name:data.title||'Senaryo',data:data,updatedAt:new Date().toISOString()});
+    }
+  }).catch(function(err){cloudError(session,err);});
+  fbUnsubscribe=session.docs.onSnapshot({includeMetadataChanges:true},function(snapshot){
+    if(cloudSession!==session || snapshot.metadata.fromCache)return;
+    var rows=readProjectRows(), refresh=false, changed=false, first=!session.ready;
+    var changes=first ? snapshot.docs.map(function(doc){return {type:'added',doc:doc};}) : snapshot.docChanges();
+    changes.forEach(function(change){
+      var doc=change.doc, p=rows.find(function(item){return item.id===doc.id;});
+      if(doc.metadata.hasPendingWrites || (p && p.pending) || (doc.id===currentProjectId && state.dirty))return;
+      var remote=doc.data();
+      var deleted=change.type==='removed' || remote.deleted;
+      if(!deleted && !remote.data)return;
+      if(p && !deleted && p.updatedAt===remote.updatedAt)return;
+      if(p)rows.splice(rows.indexOf(p),1);
+      if(!deleted)rows.push({id:doc.id,name:remote.name,data:remote.data,updatedAt:remote.updatedAt});
+      if(doc.id===currentProjectId)refresh=true;
+      changed=true;
+    });
+    var active=getProject(currentProjectId);
+    if(active && active.placeholder && !state.dirty && rows.some(function(p){return !p.placeholder && !p.deleted;})){
+      rows=rows.filter(function(p){return p.id!==currentProjectId;});
+      refresh=true;changed=true;
+    }
+    if(changed && !saveProjects(rows))return;
+    session.ready=true;
+    if(refresh || (first && !state.dirty && getProject(currentProjectId)?.placeholder)){
+      var active=getProject(currentProjectId);
+      var next=active && !active.placeholder ? active : loadProjects().find(function(p){return !p.placeholder;});
+      if(next)loadProject(next.id);
+      else if(!active)initProjects();
+    }
+    if(changed)renderProjectList();
+    rows.filter(function(p){return p.pending;}).forEach(function(p){pushProject(session,p);});
+    if(!session.writes.size)setSyncStatus('synced');
+  },function(err){session.ready=false;session.failed=true;cloudError(session,err);});
+}
+async function pushProject(session,p){
+  if(!session || !session.ready || !p || !p.pending)return false;
+  var running=session.writes.get(p.id);
+  if(running){
+    var result=await running;
+    if(!result || cloudSession!==session)return false;
+    var latest=readProjectRows().find(function(row){return row.id===p.id;});
+    return latest && latest.pending ? pushProject(session,latest) : true;
+  }
+  var version=p.pending;
+  var revision=editRevision;
+  var payload=p.deleted ? {deleted:true,updatedAt:p.updatedAt} : {name:p.name,data:p.data,updatedAt:p.updatedAt};
+  var work=Promise.resolve().then(function(){return session.docs.doc(p.id).set(payload);}).then(function(){
+    if(cloudSession!==session)return false;
+    var rows=readProjectRows(), latest=rows.find(function(row){return row.id===p.id;});
+    if(latest && latest.pending===version){
+      if(latest.deleted)rows.splice(rows.indexOf(latest),1);
+      else delete latest.pending;
+      if(!saveProjects(rows))return false;
+      if(currentProjectId===p.id && revision===editRevision)state.dirty=false;
+    }
+    session.error=null;return true;
+  }).catch(function(err){cloudError(session,err);return false;});
+  session.writes.set(p.id,work);
+  var ok=await work;
+  session.writes.delete(p.id);
+  if(cloudSession===session && ok){
+    var next=readProjectRows().find(function(row){return row.id===p.id && row.pending;});
+    if(next)return pushProject(session,next);
+    if(!session.writes.size)setSyncStatus('synced');
+  }
+  return ok;
 }
 
+window.addEventListener('online',function(){if(fbUser && cloudSession && cloudSession.failed)startRealtimeSync(fbUser.uid);});
 function setSyncStatus(s){
   var b=document.getElementById('syncBadge'),tx=document.getElementById('syncText');
   if(b)b.className='sync-badge '+s;
@@ -933,7 +1009,7 @@ function loadFromLocal(){
     }
   }
   // Fallback: legacy key
-  var sv=localStorage.getItem('plotica_project');
+  var sv=!workspaceUid && localStorage.getItem('plotica_project');
   if(sv){try{var d=JSON.parse(sv);state.title=d.title||'Yeni Senaryo';state.scenes=d.scenes||[];state.characters=d.characters||[];state.versions=d.versions||[];state.marks=d.marks||{};state.revMarks=d.revMarks||{};state.markNotes=d.markNotes||{};state.markPhotos=d.markPhotos||{};state.beatPhotos=d.beatPhotos||{};state.cover=d.cover||{};state.charBios=d.charBios||{};state.prolog=d.prolog||'';
       if(d.characters) d.characters.forEach(function(dc,i){if(state.characters[i])state.characters[i].bio=dc.bio||{};});renderAll();}catch(e){}}
 }
@@ -943,45 +1019,9 @@ function saveToLocal(){
   return true;
 }
 window.addEventListener('pagehide',function(){if(state.dirty)saveToLocal();});
-var _fbSizeWarned=false;
 function saveToFirebase(){
-  if(!fbDb||!fbUser) return Promise.resolve(false);
-  var data={
-    title:state.title,
-    prolog:state.prolog||'',
-    scenes:state.scenes,
-    characters:state.characters,
-    versions:state.versions,
-    marks:state.marks,
-    revMarks:state.revMarks||{},
-    markNotes:state.markNotes||{},
-    markPhotos:state.markPhotos||{},
-    beatPhotos:state.beatPhotos||{},
-    cover:state.cover||{},
-    charBios:state.charBios||{}
-  };
-  // Firestore hard-limits a document to 1MB. Base64 photos pile up fast; warn
-  // BEFORE the write silently fails so the user knows sync isn't saving.
-  try{
-    var bytes=0;
-    try{bytes=new Blob([JSON.stringify(data)]).size;}catch(_){bytes=JSON.stringify(data).length;}
-    var kb=Math.round(bytes/1024);
-    if(bytes>900*1024){
-      if(!_fbSizeWarned){
-        showToast('Uyarı: Proje boyutu '+kb+'KB — Firestore 1MB sınırına yakın. Fotoğraflar buluta kaydedilemeyebilir.','error');
-        _fbSizeWarned=true;
-      }
-    } else { _fbSizeWarned=false; }
-  }catch(e){}
-  data.updatedAt=firebase.firestore.FieldValue.serverTimestamp();
-  return fbDb.collection('scenarios').doc(fbUser.uid).set(data)
-    .then(function(){return true;})
-    .catch(function(err){
-      // Surface the failure instead of swallowing it silently
-      var msg=(err&&err.message)?err.message:'';
-      if(/maximum|exceeds|1048576|size/i.test(msg)) showToast('Buluta kaydedilemedi: proje 1MB sınırını aşıyor. Bazı fotoğrafları silin.','error');
-      return false;
-    });
+  if(fbUser && cloudSession && cloudSession.failed)startRealtimeSync(fbUser.uid);
+  return pushProject(cloudSession,getProject(currentProjectId));
 }
 
 /* ===== SAVE ===== */
@@ -994,7 +1034,7 @@ function saveProject(){
   var revision=editRevision, project=currentProjectId;
   var done=function(ok){
     if(project!==currentProjectId || revision!==editRevision)return;
-    state.dirty=false;
+    state.dirty=!!(isOnline && !ok);
     setSyncStatus(ok?'synced':'offline');
     var _dd=document.getElementById('dirtyDot');if(_dd)_dd.style.background='var(--green)';
     var _ds=document.getElementById('dirtyStatus');if(_ds)_ds.textContent='Kaydedildi';
@@ -4759,13 +4799,14 @@ function _parseFountain(text){
 // Each project: {id, name, updatedAt, data:{title,scenes,characters,versions,marks,revMarks,cover,charBios}}
 var currentProjectId = null;
 
-function loadProjects(){
-  try{ return JSON.parse(localStorage.getItem('plotica_projects')||'[]'); }
+function loadProjects(){return readProjectRows().filter(function(p){return !p.deleted;});}
+function readProjectRows(){
+  try{ return JSON.parse(localStorage.getItem(projectKey('plotica_projects'))||'[]'); }
   catch(e){ return []; }
 }
 function saveProjects(projects){
   try{
-    localStorage.setItem('plotica_projects', JSON.stringify(projects));
+    localStorage.setItem(projectKey('plotica_projects'), JSON.stringify(projects));
     return true;
   }catch(err){
     showToast(({tr:'Proje kaydedilemedi. Cihaz depolamasını kontrol et.',en:'Save failed. Check device storage.',es:'Error al guardar. Revisa el almacenamiento.',it:'Salvataggio fallito. Controlla lo spazio disponibile.',de:'Speichern fehlgeschlagen. Prüfe den Speicherplatz.'})[lang],'error');
@@ -4793,19 +4834,25 @@ function newProjectRecord(name){
   };
   return proj;
 }
-function createProject(name){
-  var projects=loadProjects();
+function createProject(name,placeholder){
+  var projects=readProjectRows();
   var proj=newProjectRecord(name);
+  if(placeholder)proj.placeholder=true;
+  else if(workspaceUid)proj.pending=uid('save_');
   projects.push(proj);
-  return saveProjects(projects) ? proj : null;
+  if(!saveProjects(projects))return null;
+  if(proj.pending)pushProject(cloudSession,proj);
+  return proj;
 }
 
 function saveCurrentProject(){
   if(!currentProjectId){ console.error('[PLOTICA] saveCurrentProject: no currentProjectId!'); return; }
-  var projects = loadProjects();
+  var projects = readProjectRows();
   var idx = projects.findIndex(function(p){ return p.id===currentProjectId; });
   if(idx === -1){ console.error('[PLOTICA] saveCurrentProject: project not found! id='+currentProjectId); return; }
   console.log('[PLOTICA] saveCurrentProject called, cover='+JSON.stringify(state.cover).slice(0,100)+', markNotes keys='+Object.keys(state.markNotes||{}).length);
+  delete projects[idx].placeholder;
+  if(workspaceUid)projects[idx].pending=uid('save_');
   projects[idx].name = state.title;
   projects[idx].updatedAt = new Date().toISOString();
   projects[idx].data = {
@@ -4822,7 +4869,9 @@ function saveCurrentProject(){
     cover: state.cover||{},
     charBios: state.charBios||{}
   };
-  return saveProjects(projects);
+  if(!saveProjects(projects))return false;
+  if(projects[idx].pending)pushProject(cloudSession,projects[idx]);
+  return true;
 }
 
 function loadProject(id){
@@ -4831,7 +4880,7 @@ function loadProject(id){
   if(currentProjectId && currentProjectId!==id && state.dirty && !saveCurrentProject())return;
   clearTimeout(autoSaveTimer);
   currentProjectId = id;
-  try{localStorage.setItem('plotica_active_project',id);}catch(err){}
+  try{localStorage.setItem(projectKey('plotica_active_project'),id);}catch(err){}
   var d = proj.data || {};
   state.title = d.title || proj.name;
   state.scenes = d.scenes || [];
@@ -4854,20 +4903,18 @@ function loadProject(id){
 
 function deleteProject(id){
   if(!confirm('Bu projeyi sil?')) return;
-  var projects = loadProjects().filter(function(p){ return p.id!==id; });
-  if(!projects.length){
-    projects=[newProjectRecord('Yeni Proje')];
-  }
-  if(!saveProjects(projects))return;
-  if(currentProjectId === id){
-    currentProjectId = null;
-    if(projects.length > 0){
-      loadProject(projects[projects.length-1].id);
-    } else {
-      state.title='Yeni Proje';state.scenes=[];state.characters=[];state.marks={};state.revMarks={};
-      renderAll();
-    }
-  }
+  var rows=readProjectRows(), idx=rows.findIndex(function(p){return p.id===id;});
+  if(idx<0)return;
+  var removed=rows[idx];
+  if(workspaceUid && !removed.placeholder){
+    removed={id:id,deleted:true,pending:uid('delete_'),updatedAt:new Date().toISOString()};
+    rows[idx]=removed;
+  }else rows.splice(idx,1);
+  var next=rows.find(function(p){return !p.deleted;});
+  if(!next){next=newProjectRecord('Yeni Proje');next.placeholder=true;rows.push(next);}
+  if(!saveProjects(rows))return;
+  if(currentProjectId===id){currentProjectId=null;loadProject(next.id);}
+  if(removed.pending)pushProject(cloudSession,removed);
   renderProjectList();
 }
 
@@ -4971,7 +5018,7 @@ function initProjects(){
   var projects = loadProjects();
   // Migrate old 'plotica_project' if no projects yet
   if(!projects.length){
-    var old = localStorage.getItem('plotica_project');
+    var old = !workspaceUid && localStorage.getItem('plotica_project');
     if(old){
       try{
         var d = JSON.parse(old);
@@ -4988,21 +5035,21 @@ function initProjects(){
   }
   // If still no projects, create default
   if(!projects.length){
-    var def = createProject('Yeni Proje');
+    var def = createProject('Yeni Proje',true);
     if(!def)return;
     currentProjectId = def.id;
     loadProject(def.id);
   } else {
     // Load last project
-    var savedId=localStorage.getItem('plotica_active_project');
+    var savedId=localStorage.getItem(projectKey('plotica_active_project'));
     var last=projects.find(function(p){return p.id===savedId;}) || projects[projects.length-1];
     currentProjectId = last.id;
     loadProject(last.id);
   }
   console.log('[PLOTICA] initProjects done. currentProjectId='+currentProjectId);
   renderProjectList();
-  initNewProjectFlow();
 }
+initNewProjectFlow();
 
 /* ===== INIT ===== */
 /* Sayfa görünümü varsayılan AÇIK (kullanıcı akış moduna geçebilir) */
@@ -5027,6 +5074,7 @@ if(savedCfg){
       try{ fbAuth.languageCode=lang||'tr'; }catch(e){} // doğrulama e-postası kullanıcının dilinde gelsin
       fbAuth.onAuthStateChanged(function(user){
         if(user){fbUser=user;onUserSignedIn(user);}
+        else if(workspaceUid){fbUser=null;onUserSignedOut();}
       });
     }catch(e){console.warn('Auto-init:',e);}
   });

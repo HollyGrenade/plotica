@@ -1,6 +1,6 @@
 [package]
 name = "plotica"
-version = "1.1.0"
+version = "1.1.1"
 description = "Plotica - Senaryo yazma uygulaması"
 authors = ["Hasan Basri Yaman"]
 edition = "2021"

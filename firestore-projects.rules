@@ -1,0 +1,4 @@
+// Add this match inside the existing /databases/{database}/documents block.
+match /scenarios/{uid}/projects/{projectId} {
+  allow read, write: if request.auth != null && request.auth.uid == uid;
+}
