@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Plotica",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "identifier": "com.plotica.desktop",
   "build": {
     "frontendDist": "../src"
@@ -33,6 +33,18 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI1NDA3MkI5QzY5NUZBM0EKUldRNitwWEd1WEpBSldwNjZUTkJuQXh1U1I1OEpiNVJsdHRpS1c3NWhEWjZxOEJxRjE3MzZnbysK",
+      "endpoints": [
+        "https://github.com/HollyGrenade/plotica/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

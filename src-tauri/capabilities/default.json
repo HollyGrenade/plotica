@@ -4,6 +4,7 @@
   "description": "Plotica ana pencere yetkileri",
   "windows": ["main"],
   "permissions": [
-    "core:default"
+    "core:default",
+    "updater:default"
   ]
 }

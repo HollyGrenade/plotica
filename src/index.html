@@ -875,7 +875,7 @@ function startRealtimeSync(uid){
       var d=snap.data();
       // Only load from Firebase on first load OR when not dirty
       // Never overwrite local changes that haven't been pushed yet
-      if(first){
+      if(first && !state.dirty){
         state.title=d.title||'Yeni Senaryo';
         state.prolog=d.prolog||'';
         state.scenes=d.scenes||[];
@@ -938,17 +938,11 @@ function loadFromLocal(){
       if(d.characters) d.characters.forEach(function(dc,i){if(state.characters[i])state.characters[i].bio=dc.bio||{};});renderAll();}catch(e){}}
 }
 function saveToLocal(){
-  try {
-    localStorage.setItem('plotica_project',JSON.stringify({title:state.title,prolog:state.prolog||'',scenes:state.scenes,characters:state.characters,versions:state.versions,marks:state.marks,revMarks:state.revMarks||{},markNotes:state.markNotes||{},markPhotos:state.markPhotos||{},beatPhotos:state.beatPhotos||{},cover:state.cover||{},charBios:state.charBios||{}}));
-  } catch(e) {
-    if(e.name==='QuotaExceededError'||e.code===22) {
-      // Try without photos
-      try {
-        localStorage.setItem('plotica_project',JSON.stringify({title:state.title,scenes:state.scenes,characters:state.characters,versions:state.versions,marks:state.marks,revMarks:state.revMarks||{},markNotes:state.markNotes||{},markPhotos:{},beatPhotos:{},cover:state.cover||{},charBios:state.charBios||{}}));
-      } catch(e2) {}
-    }
-  }
+  if(!saveCurrentProject())return false;
+  updateTitleSubtitle(new Date().toISOString());
+  return true;
 }
+window.addEventListener('pagehide',function(){if(state.dirty)saveToLocal();});
 var _fbSizeWarned=false;
 function saveToFirebase(){
   if(!fbDb||!fbUser) return Promise.resolve(false);
@@ -997,7 +991,9 @@ function saveProject(){
   state.versions.unshift({id:Date.now(),date:now.toLocaleDateString()+' '+now.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),label:state.title});
   if(state.versions.length>20) state.versions=state.versions.slice(0,20);
   setSyncStatus('syncing');
+  var revision=editRevision, project=currentProjectId;
   var done=function(ok){
+    if(project!==currentProjectId || revision!==editRevision)return;
     state.dirty=false;
     setSyncStatus(ok?'synced':'offline');
     var _dd=document.getElementById('dirtyDot');if(_dd)_dd.style.background='var(--green)';
@@ -1006,11 +1002,13 @@ function saveProject(){
     showToast(ok?T[lang].toastSaved:T[lang].toastLocal,'success');
     if(state.currentPanel==='vers') renderVersionsPanel();
   };
-  saveToLocal();
+  if(!saveToLocal()){state.dirty=true;setSyncStatus('offline');return;}
   if(isOnline&&fbUser){saveToFirebase().then(done);}else{done(false);}
 }
 
+var editRevision=0;
 function markDirty(){
+  editRevision++;
   state.dirty=true;
   var dd=document.getElementById('dirtyDot');
   var ds=document.getElementById('dirtyStatus');
@@ -1021,7 +1019,7 @@ function markDirty(){
   _statsTimer=setTimeout(function(){try{updateStats();}catch(e){}},300);
   clearTimeout(autoSaveTimer);
   autoSaveTimer=setTimeout(function(){
-    saveToLocal();
+    if(!saveToLocal())return;
     var _ds=document.getElementById('dirtyStatus');if(_ds)_ds.textContent='Otomatik kaydedildi';
     var _dd=document.getElementById('dirtyDot');if(_dd)_dd.style.background='var(--blue)';
     if(isOnline&&fbUser) saveToFirebase().then(function(ok){if(ok) setSyncStatus('synced');});
@@ -1128,7 +1126,7 @@ function renderScenesSidebar(){
     return '<div class="scene-item'+(i===0?' active':'')+'" data-sceneid="'+s.id+'">'
       +'<span class="scene-num">'+sceneNumberOf(i)+'</span>'
       +'<div class="scene-type-dot '+cls+'"></div>'
-      +'<span class="scene-name">'+s.type+'. '+s.location+' — '+s.time+'</span></div>';
+      +'<span class="scene-name">'+s.type+'. '+_esc(s.location)+' — '+s.time+'</span></div>';
   }).join('');
   list.querySelectorAll('.scene-item').forEach(function(el){
     el.addEventListener('click',function(){
@@ -1907,17 +1905,18 @@ function renderCharsPanel(){
   if(!state.characters.length){el.innerHTML=ab+'<div class="empty-state"><div class="empty-icon">👤</div><h3>'+((T[lang]&&T[lang].emptyChar)||'Karakter yok')+'</h3></div>';
   }else{
     el.innerHTML=ab+state.characters.map(function(c){
-      return '<div class="char-card"><div class="char-card-name">'+c.name+'</div><div class="char-card-info">'+(c.age||'—')+'</div>'+(c.notes?'<div class="char-card-info" style="font-size:10px;margin-top:4px">'+c.notes+'</div>':'')+'</div>';
+      return '<div class="char-card"><div class="char-card-name">'+_esc(c.name)+'</div><div class="char-card-info">'+_esc(c.age||'—')+'</div>'+(c.notes?'<div class="char-card-info" style="font-size:10px;margin-top:4px">'+_esc(c.notes)+'</div>':'')+'</div>';
     }).join('');
   }
   var btn=document.getElementById('addCharBtnPanel');
   if(btn) btn.addEventListener('click',function(){openModal('charModal');});
 }
+function _esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function renderVersionsPanel(){
   var el=document.getElementById('panelContent');
   if(!state.versions.length){el.innerHTML='<div class="empty-state"><div class="empty-icon">🕐</div><h3>'+((T[lang]&&T[lang].emptyVers)||'Versiyon yok')+'</h3></div>';return;}
   el.innerHTML=state.versions.map(function(v,i){
-    return '<div class="version-item'+(i===0?' current':'')+'"><div class="version-date">'+v.date+'</div><div class="version-label">'+v.label+'</div><div><span class="version-badge '+(i===0?'cur':'auto')+'">'+(i===0?((T[lang]&&T[lang].versCur)||'G\u00dcNCEL'):((T[lang]&&T[lang].versAuto)||'OTO'))+'</span></div></div>';
+    return '<div class="version-item'+(i===0?' current':'')+'"><div class="version-date">'+_esc(v.date)+'</div><div class="version-label">'+_esc(v.label)+'</div><div><span class="version-badge '+(i===0?'cur':'auto')+'">'+(i===0?((T[lang]&&T[lang].versCur)||'G\u00dcNCEL'):((T[lang]&&T[lang].versAuto)||'OTO'))+'</span></div></div>';
   }).join('');
 }
 
@@ -1925,8 +1924,6 @@ function renderVersionsPanel(){
 // Track last focused scene element for insertion point
 var _lastFocusedSid=null;
 var _lastFocusedEid=null;
-var _savedFocusSid=null;
-var _savedFocusEid=null;
 
 document.addEventListener('focusin',function(e){
   var el=e.target;
@@ -1937,17 +1934,45 @@ document.addEventListener('focusin',function(e){
   if(sid){
     _lastFocusedSid=sid;
     var wrap=el.closest?el.closest('[data-eid]'):null;
-    if(wrap) _lastFocusedEid=wrap.dataset.eid;
+    _lastFocusedEid=wrap ? wrap.dataset.eid : null;
   }
 });
 
-// Save focus before button click steals it
-document.querySelectorAll('.el-btn[data-eltype]').forEach(function(btn){
-  btn.addEventListener('mousedown',function(){
-    _savedFocusSid=_lastFocusedSid;
-    _savedFocusEid=_lastFocusedEid;
-  });
-});
+function applyElementType(type){
+  var scene=state.scenes.find(function(s){return String(s.id)===String(_lastFocusedSid);});
+  var index=scene ? scene.elements.findIndex(function(el){return String(el.id)===String(_lastFocusedEid);}) : -1;
+  if(index<0){addElement(type);return;}
+  var original=scene.elements[index];
+  if(original.type===type)return;
+  var wrap=document.querySelector('[data-eid="'+original.id+'"]');
+  var field=wrap && wrap.querySelector('textarea');
+  var target=original;
+  if(field && field.value.includes('\n')){
+    var value=field.value;
+    var cursor=field.selectionStart;
+    var start=value.slice(0,cursor).lastIndexOf('\n')+1;
+    var end=value.indexOf('\n',cursor);
+    if(end<0)end=value.length;
+    var oldType=original.type;
+    if(start>0){
+      original.content=value.slice(0,start-1);
+      target={id:uid('el_'),type:type,content:''};
+      scene.elements.splice(++index,0,target);
+    }
+    target.content=value.slice(start,end);
+    if(end<value.length){
+      scene.elements.splice(index+1,0,{id:uid('el_'),type:oldType,content:value.slice(end+1)});
+    }
+  }
+  target.type=type;
+  if(type==='transition' && !target.content)target.content='CUT TO:';
+  renderScenesEditor();
+  _lastFocusedEid=target.id;
+  var node=document.querySelector('[data-eid="'+target.id+'"]');
+  var control=node && node.querySelector('textarea,input,button');
+  if(control)control.focus();
+  markDirty();
+}
 
 function addElement(type,targetSid){
   // Senaryo sahneyle başlamak zorunda değil: hiç sahne yoksa başlıksız açılış bölümü aç
@@ -2302,7 +2327,7 @@ function doExport(){
     // Baskı sayfalayıcısı: aynı 55 satırlık ızgara + diyalog bölünmesi ((MORE)/(CONT'D))
     var _pp=paginatePrint(), _pgs=_pp.pages, _scById=_pp.scById, _elById=_pp.elById, _scIdx=_pp.scIdx;
     var _MORE=t('moreMark')||'(MORE)', _CONTD=t('contdMark')||"(CONT'D)";
-    function _esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
     _pgs.forEach(function(pg,pi){
       html += (pi===0?'':'</div>')+'<div class="page"><div class="page-num">'+(pi+1)+'.</div>';
       pg.forEach(function(b){
@@ -2367,7 +2392,7 @@ function renderADView(){
     var scDiv=document.createElement('div');
     var hd=document.createElement('div');
     hd.className='ad-scene-heading';
-    hd.innerHTML='<span class="ad-scene-num">'+(si+1)+'</span><span>'+s.type+'. '+s.location+' \u2014 '+s.time+'</span>';
+    hd.innerHTML='<span class="ad-scene-num">'+(si+1)+'</span><span>'+_esc(s.type)+'. '+_esc(s.location)+' \u2014 '+_esc(s.time)+'</span>';
     scDiv.appendChild(hd);
     s.elements.forEach(function(el){
       var text=el.content||(el.type==='character'?'KARAKTER':'...');
@@ -2542,7 +2567,7 @@ function renderBreakdownView(){
     card.className='bk-card';
     var hdr=document.createElement('div');
     hdr.className='bk-card-header';
-    hdr.innerHTML='<span class="bk-num">SAHNE '+(si+1)+'</span><span class="bk-title">'+scene.type+'. '+scene.location+' — '+scene.time+'</span>';
+    hdr.innerHTML='<span class="bk-num">SAHNE '+(si+1)+'</span><span class="bk-title">'+_esc(scene.type)+'. '+_esc(scene.location)+' — '+_esc(scene.time)+'</span>';
     card.appendChild(hdr);
     var cats=document.createElement('div');
     cats.className='bk-cats';
@@ -2689,7 +2714,7 @@ var _bkPdf=document.getElementById('bkPdfBtn');if(_bkPdf)_bkPdf.addEventListener
     });
     Object.keys(byCat).forEach(function(cid){byCat[cid]=byCat[cid].map(function(x){return typeof x==='string'?x:x.t;});});
     if(!Object.keys(byCat).length)return;
-    html+='<div class="sc"><div class="sh"><span class="sn">SAHNE '+(si+1)+'</span><span class="st">'+scene.type+'. '+scene.location+' — '+scene.time+'</span></div><div class="cats">';
+    html+='<div class="sc"><div class="sh"><span class="sn">SAHNE '+(si+1)+'</span><span class="st">'+scene.type+'. '+_esc(scene.location)+' — '+scene.time+'</span></div><div class="cats">';
     CATS.forEach(function(cat){if(!byCat[cat.id])return;html+='<div class="cr"><span class="sw" style="background:'+cat.color+'"></span><span class="cl">'+cat.label[lang]+'</span><div class="its">'+byCat[cat.id].map(function(i){return '<span class="it" style="background:'+cat.color+'">'+i.substring(0,40)+'</span>';}).join('')+'</div></div>';});
     html+='</div></div>';
   });
@@ -2764,51 +2789,7 @@ document.querySelectorAll('.panel-tab').forEach(function(tab){
 /* ===== TOOLBAR ELEMENT BUTTONS ===== */
 document.querySelectorAll('.el-btn[data-eltype]').forEach(function(btn){
   btn.addEventListener('click',function(){
-    var newType=btn.dataset.eltype;
-    // If prolog textarea is focused, insert text there
-    var prolog=document.getElementById('prologText');
-    if(prolog===document.activeElement){
-      var type=btn.dataset.eltype;
-      var inserts={action:'',character:'',dialogue:'',parenthetical:'()',transition:'FADE IN:'};
-      var text=inserts[type]||'';
-      var s=prolog.selectionStart,e=prolog.selectionEnd;
-      var before=prolog.value.substring(0,s);
-      var after=prolog.value.substring(e);
-      var prefix=(before.length>0&&!before.endsWith('\n'))?'\n':'';
-      var suffix='\n';
-      prolog.value=before+prefix+text+suffix+after;
-      var pos=before.length+prefix.length+text.length+suffix.length;
-      prolog.setSelectionRange(pos-suffix.length,pos-suffix.length);
-      prolog.style.height='auto';prolog.style.height=prolog.scrollHeight+'px';
-      state.prolog=prolog.value;markDirty();
-      return;
-    }
-    // Use saved focus (mousedown captures before click steals focus)
-    var useSid=_savedFocusSid||_lastFocusedSid;
-    var useEid=_savedFocusEid||_lastFocusedEid;
-    if(useSid&&useEid){
-      var sc=state.scenes.find(function(s){return String(s.id)===String(useSid);});
-      var elObj=sc&&sc.elements.find(function(e){return String(e.id)===String(useEid);});
-      if(elObj){
-        if(elObj.type===newType){return;} // same type, do nothing
-        elObj.type=newType;
-        var wrap=document.querySelector('[data-eid="'+useEid+'"]');
-        if(wrap){
-          var parent=wrap.parentNode;
-          var next=wrap.nextSibling;
-          var newWrap=buildElement(useSid,elObj);
-          newWrap.dataset.eid=elObj.id;
-          parent.removeChild(wrap);
-          if(next) parent.insertBefore(newWrap,next);
-          else parent.appendChild(newWrap);
-          var inputs=newWrap.querySelectorAll('input[type=text],input:not([type]),textarea');
-          if(inputs[0]){inputs[0].focus();inputs[0].scrollIntoView({behavior:'smooth',block:'nearest'});}
-          _lastFocusedEid=elObj.id;_lastFocusedSid=useSid;
-          markDirty();return;
-        }
-      }
-    }
-    addElement(newType);
+    applyElementType(btn.dataset.eltype);
   });
 });
 
@@ -2828,8 +2809,8 @@ var _hmbrg=document.getElementById('hamburgerBtn');if(_hmbrg)_hmbrg.addEventList
 var _prjTitle=document.getElementById('projectTitle');if(_prjTitle)_prjTitle.addEventListener('input',function(){
   document.getElementById('titleDisplay').textContent=this.value||'Yeni Senaryo';
   state.title=this.value;
-  if(currentProjectId)saveCurrentProject();
-  renderProjectList();
+  var label=document.querySelector('.proj-item.active .proj-item-name');
+  if(label)label.textContent=state.title;
   markDirty();
 });
 
@@ -3439,41 +3420,7 @@ document.addEventListener('keydown',function(e){
   var fmap={F1:'action',F2:'character',F3:'dialogue',F4:'parenthetical',F5:'transition'};
   if(fmap[e.key]){
     e.preventDefault();
-    var newType=fmap[e.key];
-    var prologEl=document.getElementById('prologText');
-    if(prologEl===document.activeElement){
-      var inserts={action:'',character:'',dialogue:'',parenthetical:'()',transition:'FADE IN:'};
-      var text=inserts[newType]||'';
-      var ss=prologEl.selectionStart;
-      var before=prologEl.value.substring(0,ss);
-      var after=prologEl.value.substring(ss);
-      var prefix=(before.length>0&&!before.endsWith('\n'))?'\n':'';
-      prologEl.value=before+prefix+text+'\n'+after;
-      var npos=ss+prefix.length+text.length;
-      prologEl.setSelectionRange(npos,npos);
-      prologEl.style.height='auto';prologEl.style.height=prologEl.scrollHeight+'px';
-      state.prolog=prologEl.value;markDirty();
-    } else if(_lastFocusedSid&&_lastFocusedEid){
-      // Convert focused element type
-      var sc2=state.scenes.find(function(s){return String(s.id)===String(_lastFocusedSid);});
-      var elObj2=sc2&&sc2.elements.find(function(e){return String(e.id)===String(_lastFocusedEid);});
-      if(elObj2&&elObj2.type!==newType){
-        elObj2.type=newType;
-        var wrap2=document.querySelector('[data-eid="'+_lastFocusedEid+'"]');
-        if(wrap2){
-          var par2=wrap2.parentNode;var nxt2=wrap2.nextSibling;
-          var nw2=buildElement(_lastFocusedSid,elObj2);
-          nw2.dataset.eid=elObj2.id;
-          par2.removeChild(wrap2);
-          if(nxt2) par2.insertBefore(nw2,nxt2); else par2.appendChild(nw2);
-          var inp2=nw2.querySelectorAll('input[type=text],input:not([type]),textarea');
-          if(inp2[0]){inp2[0].focus();inp2[0].scrollIntoView({behavior:'smooth',block:'nearest'});}
-          markDirty();
-        }
-      }
-    } else {
-      addElement(newType);
-    }
+    applyElementType(fmap[e.key]);
     return;
   }
   if(e.key==='F6'){e.preventDefault();addSceneInline();}
@@ -4817,36 +4764,12 @@ function loadProjects(){
   catch(e){ return []; }
 }
 function saveProjects(projects){
-  try {
-    var json = JSON.stringify(projects);
-    localStorage.setItem('plotica_projects', json);
-    console.log('saveProjects OK, size:', json.length, 'bytes');
-  } catch(e) {
-    if(e.name === 'QuotaExceededError' || e.code === 22) {
-      // Storage full — try saving without photos
-      showToast('Depolama dolu, foto\u011fraflar k\u0131salt\u0131l\u0131yor...', 'info');
-      var slim = JSON.parse(JSON.stringify(projects));
-      slim.forEach(function(p) {
-        if(!p.data) return;
-        // Keep only last 1 photo per breakdown item, compress beat photos
-        if(p.data.markPhotos) {
-          Object.keys(p.data.markPhotos).forEach(function(k) {
-            if(p.data.markPhotos[k] && p.data.markPhotos[k].length > 1)
-              p.data.markPhotos[k] = p.data.markPhotos[k].slice(-1);
-          });
-        }
-        // Remove beat photos (largest items) as last resort
-        if(p.data.beatPhotos) p.data.beatPhotos = {};
-      });
-      try {
-        localStorage.setItem('plotica_projects', JSON.stringify(slim));
-        showToast('K\u0131salt\u0131lm\u0131\u015f halde kaydedildi', 'info');
-      } catch(e2) {
-        // Last resort: save without any photos
-        slim.forEach(function(p) { if(p.data) { p.data.markPhotos={}; p.data.markNotes=p.data.markNotes||{}; } });
-        try { localStorage.setItem('plotica_projects', JSON.stringify(slim)); } catch(e3) {}
-      }
-    }
+  try{
+    localStorage.setItem('plotica_projects', JSON.stringify(projects));
+    return true;
+  }catch(err){
+    showToast(({tr:'Proje kaydedilemedi. Cihaz depolamasını kontrol et.',en:'Save failed. Check device storage.',es:'Error al guardar. Revisa el almacenamiento.',it:'Salvataggio fallito. Controlla lo spazio disponibile.',de:'Speichern fehlgeschlagen. Prüfe den Speicherplatz.'})[lang],'error');
+    return false;
   }
 }
 
@@ -4854,9 +4777,8 @@ function getProject(id){
   return loadProjects().find(function(p){ return p.id===id; });
 }
 
-function createProject(name){
-  var projects = loadProjects();
-  var id = 'proj_'+Date.now();
+function newProjectRecord(name){
+  var id = uid('proj_');
   var proj = {
     id: id,
     name: name || 'Yeni Proje',
@@ -4869,9 +4791,13 @@ function createProject(name){
       charBios:{}
     }
   };
-  projects.push(proj);
-  saveProjects(projects);
   return proj;
+}
+function createProject(name){
+  var projects=loadProjects();
+  var proj=newProjectRecord(name);
+  projects.push(proj);
+  return saveProjects(projects) ? proj : null;
 }
 
 function saveCurrentProject(){
@@ -4896,15 +4822,16 @@ function saveCurrentProject(){
     cover: state.cover||{},
     charBios: state.charBios||{}
   };
-  saveProjects(projects);
-  // Keep legacy key in sync so offline/loadFromLocal always has fresh data
-  try{ localStorage.setItem('plotica_project', JSON.stringify(projects[idx].data)); }catch(e){}
+  return saveProjects(projects);
 }
 
 function loadProject(id){
   var proj = getProject(id);
   if(!proj) return;
+  if(currentProjectId && currentProjectId!==id && state.dirty && !saveCurrentProject())return;
+  clearTimeout(autoSaveTimer);
   currentProjectId = id;
+  try{localStorage.setItem('plotica_active_project',id);}catch(err){}
   var d = proj.data || {};
   state.title = d.title || proj.name;
   state.scenes = d.scenes || [];
@@ -4928,7 +4855,10 @@ function loadProject(id){
 function deleteProject(id){
   if(!confirm('Bu projeyi sil?')) return;
   var projects = loadProjects().filter(function(p){ return p.id!==id; });
-  saveProjects(projects);
+  if(!projects.length){
+    projects=[newProjectRecord('Yeni Proje')];
+  }
+  if(!saveProjects(projects))return;
   if(currentProjectId === id){
     currentProjectId = null;
     if(projects.length > 0){
@@ -4957,13 +4887,14 @@ function renderProjectList(){
     var d = new Date(proj.updatedAt);
     var dateStr = d.toLocaleDateString('tr-TR',{day:'2-digit',month:'short'});
     item.innerHTML = '<span class="icon" style="font-size:13px;">📄</span>'
-      +'<span class="proj-item-name">'+proj.name+'</span>'
+      +'<span class="proj-item-name"></span>'
       +'<span class="proj-item-badge">'+dateStr+'</span>'
-      +'<button class="proj-item-del" data-id="'+proj.id+'" title="Sil">✕</button>';
+      +'<button class="proj-item-del" title="Sil">✕</button>';
+    item.querySelector('.proj-item-name').textContent=proj.name;
     item.addEventListener('click', function(e){
       if(e.target.classList.contains('proj-item-del')) return;
       if(currentProjectId === proj.id) return;
-      if(state.dirty) saveCurrentProject();
+
       loadProject(proj.id);
     });
     item.querySelector('.proj-item-del').addEventListener('click', function(e){
@@ -5013,6 +4944,7 @@ function initNewProjectFlow(){
     if(e.key==='Enter'){
       var name = inp.value.trim() || 'Yeni Proje';
       var proj = createProject(name);
+      if(!proj)return;
       wrap.style.display='none';
       loadProject(proj.id);
       showToast('Proje olu\u015fturuldu: '+name,'success');
@@ -5025,15 +4957,6 @@ function initNewProjectFlow(){
     setTimeout(function(){ wrap.style.display='none'; }, 150);
   });
 }
-
-// Override saveToLocal to also save to project
-var _origSaveToLocal = saveToLocal;
-saveToLocal = function(){
-  _origSaveToLocal();
-  saveCurrentProject();
-  // Update subtitle with current time
-  updateTitleSubtitle(new Date().toISOString());
-};
 
 // Override saveProject to update subtitle
 var _origSaveProject = saveProject;
@@ -5066,11 +4989,13 @@ function initProjects(){
   // If still no projects, create default
   if(!projects.length){
     var def = createProject('Yeni Proje');
+    if(!def)return;
     currentProjectId = def.id;
     loadProject(def.id);
   } else {
     // Load last project
-    var last = projects[projects.length-1];
+    var savedId=localStorage.getItem('plotica_active_project');
+    var last=projects.find(function(p){return p.id===savedId;}) || projects[projects.length-1];
     currentProjectId = last.id;
     loadProject(last.id);
   }
@@ -5106,6 +5031,25 @@ if(savedCfg){
     }catch(e){console.warn('Auto-init:',e);}
   });
 }
+async function checkDesktopUpdate(){
+  var api=window.__TAURI__;
+  if(!api || !api.updater)return;
+  var update;
+  try{
+    update=await api.updater.check({timeout:10000});
+    if(!update)return;
+    await update.download();
+    // Do not interrupt an active writing session. Retry on next launch.
+    if(state.dirty || document.querySelector('textarea:focus,input:focus'))return;
+    document.body.inert=true;
+    try{
+      await update.install();
+      await api.core.invoke('restart_after_update');
+    }finally{document.body.inert=false;}
+  }catch(err){console.warn('Plotica updater:',err);}
+  finally{if(update)await update.close().catch(function(){});}
+}
+checkDesktopUpdate();
 </script>
 </body>
 </html>

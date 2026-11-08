@@ -494,11 +494,15 @@ fn open_url(url: String) -> Result<(), String> {
     webbrowser::open(&url).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn restart_after_update(app: tauri::AppHandle) { app.restart(); }
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![google_login, open_url, save_text_file, print_html, export_pdf])
+        .invoke_handler(tauri::generate_handler![restart_after_update, google_login, open_url, save_text_file, print_html, export_pdf])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
